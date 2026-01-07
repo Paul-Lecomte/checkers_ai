@@ -1,3 +1,9 @@
-.idea
-.git
 __pycache__/
+.vscode/
+.env
+*.pyc
+.idea/
+.DS_Store
+dist/
+build/
+
