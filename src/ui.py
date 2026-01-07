@@ -56,6 +56,10 @@ class PygameUI:
         self.model_control: Set[str] = set()
         # human-visible model status message shown in sidebar
         self.model_message: str = ""
+        # model activity visualization
+        self.model_thinking: bool = False
+        self.last_model_scores: Optional[List[tuple]] = None  # list of (move, score)
+        self.model_think_start: float = 0.0
 
         # training state
         self.training = False
@@ -213,17 +217,35 @@ class PygameUI:
                  # prefer model-controlled move if configured
                  if self.current_player in self.model_control and self.model is not None and score_moves is not None:
                      try:
-                         scored = score_moves(self.board, generate_legal_moves(self.board, self.current_player), self.model)
-                         if scored:
+                         # indicate thinking
+                         self.model_thinking = True
+                         self.model_think_start = time.time()
+                         moves = generate_legal_moves(self.board, self.current_player)
+                         scored = score_moves(self.board, moves, self.model)
+                         # store for visualization
+                         self.last_model_scores = sorted(scored, key=lambda t: t[1], reverse=True)
+                         if self.last_model_scores:
                              # choose best score
-                             scored.sort(key=lambda t: t[1], reverse=True)
-                             move = scored[0][0]
+                             move = self.last_model_scores[0][0]
+                         # short visible pause so user sees the thinking/visual
+                         time.sleep(0.35)
                      except Exception as e:
                          print("Model move error, falling back to random:", e)
                          move = None
+                     finally:
+                         self.model_thinking = False
                  if move is None:
                      move = choose_random_move(self.board, self.current_player)
                  if move:
+                     # highlight chosen move in last_model_scores if present
+                     try:
+                         if self.last_model_scores is not None:
+                             # move may not be in list if random fallback; ensure it's first
+                             if not any(m is move or (m.frm == move.frm and m.to == move.to) for m, _ in self.last_model_scores):
+                                 # prepend move with a neutral score
+                                 self.last_model_scores = [(move, 0.0)] + (self.last_model_scores or [])
+                     except Exception:
+                         pass
                      self._perform_move_or_animate(move)
 
             # update animation
@@ -446,6 +468,41 @@ class PygameUI:
                  model_label = "model"
          ml = font.render(f"Model: {model_label}", True, (200, 200, 255))
          screen.blit(ml, (x0, y)); y += 20
+         # model message (status)
+         if self.model_message:
+             mm = font.render(self.model_message, True, (200, 180, 120))
+             screen.blit(mm, (x0, y)); y += 18
+
+         # training status
+         tstatus = font.render(self.training_status, True, (200, 200, 200))
+         screen.blit(tstatus, (x0, y))
+         y += 24
+
+         # model activity visualization
+         if self.model_thinking:
+             think_text = font.render("Model: thinking...", True, (255, 255, 0))
+             screen.blit(think_text, (x0, y)); y += 20
+         if self.last_model_scores:
+             # draw small bar chart of scores (normalized)
+             scores = [s for (_m, s) in self.last_model_scores]
+             min_s = min(scores)
+             max_s = max(scores)
+             span = max(1e-6, max_s - min_s)
+             # limit to top 8 moves
+             for m, s in self.last_model_scores[:8]:
+                 label = f"{m.frm}->{m.to}"
+                 score_text = font.render(label, True, (200, 255, 200))
+                 screen.blit(score_text, (x0, y))
+                 # bar
+                 bar_x = x0 + 80
+                 bar_y = y + 4
+                 bar_w = self.sidebar_width - 16 - 90
+                 normalized = (s - min_s) / span if span > 0 else 0.5
+                 fill_w = int(bar_w * normalized)
+                 pygame.draw.rect(screen, (30, 200, 30), (bar_x, bar_y, fill_w, 12))
+                 pygame.draw.rect(screen, (80, 80, 80), (bar_x, bar_y, bar_w, 12), 1)
+                 y += 18
+             y += 6
 
          # buttons
          btn_w = self.sidebar_width - 16
