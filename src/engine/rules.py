@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from src.engine.board import Board
 from src.engine.move import Move, Pos
 from src.engine.piece import Piece
@@ -113,3 +113,55 @@ def apply_move(board: Board, move: Move) -> Board:
         nb.get_piece(move.to).promote()
     return nb
 
+
+def has_any_moves(board: Board, color: str) -> bool:
+    """Return True if player `color` has any legal move."""
+    moves = generate_legal_moves(board, color)
+    return bool(moves)
+
+
+def count_pieces(board: Board, color: str) -> int:
+    """Count pieces of a given color on the board."""
+    return board.count_pieces(color)
+
+
+def determine_winner(board: Board, current_player: str = None) -> Optional[str]:
+    """Determine the winner of the game if any.
+
+    Returns:
+      - 'white' or 'black' if that player has won,
+      - 'draw' if neither player has moves/pieces,
+      - None if the game is not finished.
+
+    Logic used:
+      - If a player has zero pieces -> opponent wins.
+      - If a player has zero legal moves -> opponent wins.
+      - If both players have no moves -> 'draw'.
+
+    The optional `current_player` arg is not strictly necessary for the result here,
+    but can be useful for checking draw conditions.
+    """
+    white_pieces = count_pieces(board, 'white')
+    black_pieces = count_pieces(board, 'black')
+
+    white_has_moves = has_any_moves(board, 'white')
+    black_has_moves = has_any_moves(board, 'black')
+
+    # If a player has 0 pieces -> opponent wins
+    if white_pieces == 0 and black_pieces == 0:
+        return 'draw'
+    if white_pieces == 0:
+        return 'black'
+    if black_pieces == 0:
+        return 'white'
+
+    # If a player has no legal moves -> opponent wins
+    if not white_has_moves and not black_has_moves:
+        return 'draw'
+    if not white_has_moves:
+        return 'black'
+    if not black_has_moves:
+        return 'white'
+
+    # No winner yet
+    return None

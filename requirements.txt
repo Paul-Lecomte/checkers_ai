@@ -1,4 +1,7 @@
 pygame==2.1.3
 pytest>=7.0
+# PyTorch installation is platform-specific; install via official instructions if needed
+# Add a plain 'torch' entry if you want pip to try installing a CPU wheel automatically
+torch
 # Add other dev deps as needed
 
