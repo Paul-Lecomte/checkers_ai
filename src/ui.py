@@ -1,4 +1,5 @@
-from typing import Callable, Optional, List, Set
+from typing import Callable, Optional, List, Set, Tuple
+import threading
 
 import pygame
 import time
@@ -8,18 +9,23 @@ from src.engine.move import Move, Pos
 from src.engine.rules import generate_legal_moves, apply_move, determine_winner, count_pieces
 from src.ai import choose_random_move
 
+# optional nn utilities
 try:
-    # optional import; score_moves is defined only if nn module is available
-    from src.nn import score_moves
+    from src.nn import score_moves, train_random_positions, CheckersNet, load_model
 except Exception:
     score_moves = None
+    train_random_positions = None
+    CheckersNet = None
+    load_model = None
 
 
 class PygameUI:
-    """Pygame UI with animated moves and an optional sidebar showing NN info.
+    """Pygame UI with animated moves, sidebar and model controls.
 
-    - ai_players: set of colors controlled by AI
-    - model: optional ML model used by `score_moves` (passed via score_moves closure)
+    Buttons added in sidebar:
+      - Reset: reset the board
+      - Toggle Model AI: cycle which colors the model controls (None/White/Black/Both)
+      - Train Model: start a background training run (uses train_random_positions)
     """
 
     def __init__(self, board: Board, square_size: int = 80, margin: int = 20, on_advance: Optional[Callable] = None, ai_players: Optional[Set[str]] = None, model: Optional[object] = None, sidebar_width: int = 240, anim_seconds: float = 0.35):
@@ -45,6 +51,15 @@ class PygameUI:
         self.anim_elapsed = 0.0
         self.anim_piece_color = None
         self.board_before_anim: Optional[Board] = None
+
+        # model control state: which colors are controlled by the neural network
+        self.model_control: Set[str] = set()
+
+        # training state
+        self.training = False
+        self.training_status = ""
+        self._training_thread: Optional[threading.Thread] = None
+        self._model_lock = threading.Lock()
 
     def set_on_advance(self, callback: Callable[[Board], Board]):
         self.on_advance = callback
@@ -155,6 +170,18 @@ class PygameUI:
                         else:
                             print("Advance pressed (no callback set)")
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and not self.animating:
+                    mx, my = event.pos
+                    board_left = 0
+                    board_top = 0
+                    board_px_local = board_px
+                    # check if click is in sidebar
+                    if mx >= board_px_local:
+                        # handle sidebar button clicks
+                        rel_x = mx - board_px_local
+                        rel_y = my
+                        self._handle_sidebar_click(rel_x, rel_y, font)
+                        continue
+                    # otherwise handle board clicks
                     board_pos = self._mouse_to_board(event.pos)
                     if board_pos is None:
                         continue
@@ -179,7 +206,20 @@ class PygameUI:
             if not self.animating and self.current_player in self.ai_players:
                 # small pause to make it visible
                 time.sleep(0.2)
-                move = choose_random_move(self.board, self.current_player)
+                move = None
+                # prefer model-controlled move if configured
+                if self.current_player in self.model_control and self.model is not None and score_moves is not None:
+                    try:
+                        scored = score_moves(self.board, generate_legal_moves(self.board, self.current_player), self.model)
+                        if scored:
+                            # choose best score
+                            scored.sort(key=lambda t: t[1], reverse=True)
+                            move = scored[0][0]
+                    except Exception as e:
+                        print("Model move error, falling back to random:", e)
+                        move = None
+                if move is None:
+                    move = choose_random_move(self.board, self.current_player)
                 if move:
                     self._perform_move_or_animate(move)
 
@@ -269,6 +309,88 @@ class PygameUI:
             cy = self.margin + tr * self.square_size + self.square_size // 2
             pygame.draw.circle(surface, (34, 139, 34), (cx, cy), max(6, self.square_size // 8))
 
+    def _handle_sidebar_click(self, rel_x: int, rel_y: int, font: pygame.font.Font) -> None:
+        """Handle clicks in the sidebar area. Coordinates are relative to the sidebar origin."""
+        # define button layout to match _draw_sidebar positions
+        x0 = 8
+        y = 8 + 32 + 24 + 28 + 32  # approximate position after header+counts+winner
+        btn_w = self.sidebar_width - 16
+        btn_h = 28
+        # Reset button
+        reset_rect = pygame.Rect(x0, y, btn_w, btn_h)
+        y += btn_h + 8
+        # Toggle Model AI
+        toggle_rect = pygame.Rect(x0, y, btn_w, btn_h)
+        y += btn_h + 8
+        # Train Model
+        train_rect = pygame.Rect(x0, y, btn_w, btn_h)
+
+        # check which was clicked
+        click_point = (rel_x, rel_y)
+        if reset_rect.collidepoint(click_point):
+            self._do_reset()
+            return
+        if toggle_rect.collidepoint(click_point):
+            self._cycle_model_control()
+            return
+        if train_rect.collidepoint(click_point):
+            self._start_training_thread()
+            return
+
+    def _do_reset(self) -> None:
+        # reset the logical board and UI state
+        self.board = Board.setup_start()
+        self.selected = None
+        self.legal_moves = []
+        self.animating = False
+        self.anim_move = None
+        self.anim_elapsed = 0.0
+        self.current_player = 'black'
+        self.training_status = ""
+        print("Board reset")
+
+    def _cycle_model_control(self) -> None:
+        # cycle through: none -> white -> black -> both -> none
+        if not self.model_control:
+            self.model_control = {'white'}
+        elif self.model_control == {'white'}:
+            self.model_control = {'black'}
+        elif self.model_control == {'black'}:
+            self.model_control = {'white', 'black'}
+        else:
+            self.model_control = set()
+        print("Model now controls:", self.model_control)
+
+    def _start_training_thread(self) -> None:
+        if train_random_positions is None or CheckersNet is None:
+            print("Training not available: PyTorch or training utilities missing.")
+            return
+        if self.training:
+            print("Training already running")
+            return
+        # ensure a model exists
+        with self._model_lock:
+            if self.model is None:
+                self.model = CheckersNet()
+        # start thread
+        self.training = True
+        self.training_status = "Starting..."
+
+        def _train():
+            def progress_cb(epoch, loss):
+                self.training_status = f"Epoch {epoch}: loss={loss:.4f}"
+            try:
+                train_random_positions(self.model, epochs=5, n_positions=64, progress_callback=progress_cb)
+                self.training_status = "Training done"
+            except Exception as e:
+                self.training_status = f"Training error: {e}"
+            finally:
+                self.training = False
+
+        t = threading.Thread(target=_train, daemon=True)
+        t.start()
+        self._training_thread = t
+
     def _draw_sidebar(self, screen: pygame.Surface, rect: pygame.Rect, font: pygame.font.Font, large_font: pygame.font.Font) -> None:
         x0 = rect.x + 8
         y = 8
@@ -295,14 +417,44 @@ class PygameUI:
             screen.blit(win_text, (x0, y)); y += 32
 
         # model info
+        model_label = "None"
         if self.model is not None:
             try:
-                # try to show simple model info
                 params = sum(p.numel() for p in self.model.parameters())
-                mi = font.render(f"Model params: {params}", True, (200, 200, 255))
-                screen.blit(mi, (x0, y)); y += 20
+                model_label = f"params={params}"
             except Exception:
-                pass
+                model_label = "model"
+        ml = font.render(f"Model: {model_label}", True, (200, 200, 255))
+        screen.blit(ml, (x0, y)); y += 20
+
+        # buttons
+        btn_w = self.sidebar_width - 16
+        btn_h = 28
+        # Reset
+        reset_rect = pygame.Rect(x0, y, btn_w, btn_h)
+        pygame.draw.rect(screen, (100, 80, 80), reset_rect)
+        reset_text = font.render("Reset", True, (255, 255, 255))
+        screen.blit(reset_text, (x0 + 8, y + 6))
+        y += btn_h + 8
+        # Toggle Model AI
+        toggle_rect = pygame.Rect(x0, y, btn_w, btn_h)
+        pygame.draw.rect(screen, (80, 100, 80), toggle_rect)
+        mc_label = ",".join(sorted(self.model_control)) if self.model_control else "None"
+        toggle_text = font.render(f"Model controls: {mc_label}", True, (255, 255, 255))
+        screen.blit(toggle_text, (x0 + 8, y + 6))
+        y += btn_h + 8
+        # Train Model
+        train_rect = pygame.Rect(x0, y, btn_w, btn_h)
+        train_color = (80, 80, 120) if not self.training else (120, 120, 80)
+        pygame.draw.rect(screen, train_color, train_rect)
+        train_text = font.render("Train Model", True, (255, 255, 255))
+        screen.blit(train_text, (x0 + 8, y + 6))
+        y += btn_h + 12
+
+        # training status
+        tstatus = font.render(self.training_status, True, (200, 200, 200))
+        screen.blit(tstatus, (x0, y))
+        y += 24
 
         # If a piece is selected, show legal moves and model scores (if available)
         if self.selected is not None:
@@ -328,5 +480,5 @@ class PygameUI:
 
         # draw small legend
         y = rect.y + rect.h - 80
-        l1 = font.render("Esc/q: Quit    Space: Advance", True, (180, 180, 180))
+        l1 = font.render("Esc/q: Quit    Space: Advance    Click buttons in sidebar", True, (180, 180, 180))
         screen.blit(l1, (x0, y))

@@ -9,7 +9,8 @@ This module provides:
 
 Note: PyTorch must be installed in the environment to import and use this module.
 """
-from typing import List, Optional
+from typing import List, Optional, Callable
+from random import randint, choice
 
 import torch
 import torch.nn as nn
@@ -17,7 +18,7 @@ import torch.nn.functional as F
 
 from src.engine.board import Board
 from src.engine.move import Move
-from src.engine.rules import apply_move
+from src.engine.rules import apply_move, generate_legal_moves, count_pieces
 
 
 def board_to_tensor(board: Board, device: Optional[torch.device] = None) -> torch.Tensor:
@@ -113,4 +114,57 @@ def train_step(model: nn.Module, optimizer: torch.optim.Optimizer, boards: torch
     loss.backward()
     optimizer.step()
     return float(loss.item())
+
+
+def train_random_positions(model: nn.Module, epochs: int = 10, lr: float = 1e-3, n_positions: int = 32, max_playout: int = 12, device: Optional[torch.device] = None, progress_callback: Optional[Callable[[int, float], None]] = None) -> None:
+    """Train model for a few epochs on randomly generated positions.
+
+    This is a lightweight demo trainer: it generates random playouts from the start
+    position (random lengths up to max_playout), computes a simple material-based
+    target (white pieces - black pieces normalized), and trains the network using MSE.
+
+    - model is modified in-place.
+    - progress_callback(epoch, avg_loss) called after each epoch if provided.
+    """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    for epoch in range(1, epochs + 1):
+        losses = []
+        boards_batch = []
+        targets = []
+        for i in range(n_positions):
+            # generate random playout
+            b = Board.setup_start()
+            current = 'black'
+            steps = randint(0, max_playout)
+            for _ in range(steps):
+                moves = generate_legal_moves(b, current)
+                if not moves:
+                    break
+                mv = choice(moves)
+                b = apply_move(b, mv)
+                current = 'white' if current == 'black' else 'black'
+            # target = normalized material balance (white - black)/12
+            wc = count_pieces(b, 'white')
+            bc = count_pieces(b, 'black')
+            target = float(wc - bc) / 12.0
+            boards_batch.append(board_to_tensor(b, device=device).squeeze(0))
+            targets.append(target)
+
+        # create tensors
+        boards_tensor = torch.stack(boards_batch, dim=0)
+        targets_tensor = torch.tensor(targets, dtype=torch.float32, device=device)
+
+        loss = train_step(model, optimizer, boards_tensor, targets_tensor)
+        if progress_callback:
+            try:
+                progress_callback(epoch, loss)
+            except Exception:
+                pass
+
+    # done training
+    model.to('cpu')
 
