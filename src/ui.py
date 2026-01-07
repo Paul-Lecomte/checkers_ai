@@ -54,6 +54,8 @@ class PygameUI:
 
         # model control state: which colors are controlled by the neural network
         self.model_control: Set[str] = set()
+        # human-visible model status message shown in sidebar
+        self.model_message: str = ""
 
         # training state
         self.training = False
@@ -203,25 +205,26 @@ class PygameUI:
                                 self.legal_moves = []
 
             # AI turn: if it's AI's turn and not animating, play
-            if not self.animating and self.current_player in self.ai_players:
-                # small pause to make it visible
-                time.sleep(0.2)
-                move = None
-                # prefer model-controlled move if configured
-                if self.current_player in self.model_control and self.model is not None and score_moves is not None:
-                    try:
-                        scored = score_moves(self.board, generate_legal_moves(self.board, self.current_player), self.model)
-                        if scored:
-                            # choose best score
-                            scored.sort(key=lambda t: t[1], reverse=True)
-                            move = scored[0][0]
-                    except Exception as e:
-                        print("Model move error, falling back to random:", e)
-                        move = None
-                if move is None:
-                    move = choose_random_move(self.board, self.current_player)
-                if move:
-                    self._perform_move_or_animate(move)
+            # Consider both simple ai_players and model_control (model-controlled colors)
+            if not self.animating and (self.current_player in self.ai_players or self.current_player in self.model_control):
+                 # small pause to make it visible
+                 time.sleep(0.2)
+                 move = None
+                 # prefer model-controlled move if configured
+                 if self.current_player in self.model_control and self.model is not None and score_moves is not None:
+                     try:
+                         scored = score_moves(self.board, generate_legal_moves(self.board, self.current_player), self.model)
+                         if scored:
+                             # choose best score
+                             scored.sort(key=lambda t: t[1], reverse=True)
+                             move = scored[0][0]
+                     except Exception as e:
+                         print("Model move error, falling back to random:", e)
+                         move = None
+                 if move is None:
+                     move = choose_random_move(self.board, self.current_player)
+                 if move:
+                     self._perform_move_or_animate(move)
 
             # update animation
             if self.animating and self.anim_move is not None:
@@ -311,31 +314,21 @@ class PygameUI:
 
     def _handle_sidebar_click(self, rel_x: int, rel_y: int, font: pygame.font.Font) -> None:
         """Handle clicks in the sidebar area. Coordinates are relative to the sidebar origin."""
-        # define button layout to match _draw_sidebar positions
-        x0 = 8
-        y = 8 + 32 + 24 + 28 + 32  # approximate position after header+counts+winner
-        btn_w = self.sidebar_width - 16
-        btn_h = 28
-        # Reset button
-        reset_rect = pygame.Rect(x0, y, btn_w, btn_h)
-        y += btn_h + 8
-        # Toggle Model AI
-        toggle_rect = pygame.Rect(x0, y, btn_w, btn_h)
-        y += btn_h + 8
-        # Train Model
-        train_rect = pygame.Rect(x0, y, btn_w, btn_h)
-
-        # check which was clicked
         click_point = (rel_x, rel_y)
-        if reset_rect.collidepoint(click_point):
-            self._do_reset()
-            return
-        if toggle_rect.collidepoint(click_point):
-            self._cycle_model_control()
-            return
-        if train_rect.collidepoint(click_point):
-            self._start_training_thread()
-            return
+        # Use cached button rects (relative to sidebar) if available
+        btns = getattr(self, '_sidebar_buttons', None)
+        if btns:
+            if btns.get('reset') and btns['reset'].collidepoint(click_point):
+                self._do_reset()
+                return
+            if btns.get('toggle') and btns['toggle'].collidepoint(click_point):
+                self._cycle_model_control()
+                return
+            if btns.get('train') and btns['train'].collidepoint(click_point):
+                self._start_training_thread()
+                return
+        # fallback: ignore click if no cached buttons
+        return
 
     def _do_reset(self) -> None:
         # reset the logical board and UI state
@@ -359,6 +352,33 @@ class PygameUI:
             self.model_control = {'white', 'black'}
         else:
             self.model_control = set()
+        # ensure a model exists if the user assigned model control
+        if self.model_control and self.model is None:
+            # try to (re)import NN utilities dynamically in case they were not available at module load
+            try:
+                from src import nn as _nnmod
+                # expose function references at module scope
+                globals()['score_moves'] = getattr(_nnmod, 'score_moves', None)
+                globals()['train_random_positions'] = getattr(_nnmod, 'train_random_positions', None)
+                globals()['CheckersNet'] = getattr(_nnmod, 'CheckersNet', None)
+                globals()['load_model'] = getattr(_nnmod, 'load_model', None)
+            except Exception:
+                # leave existing values as-is
+                pass
+
+            if 'CheckersNet' in globals() and globals()['CheckersNet'] is not None:
+                with self._model_lock:
+                    if self.model is None:
+                        try:
+                            self.model = globals()['CheckersNet']()
+                            self.model_message = "Model instantiated"
+                            print("Instantiated new CheckersNet for model control")
+                        except Exception as e:
+                            self.model_message = f"Failed to instantiate model: {e}"
+                            print("Failed to instantiate model:", e)
+            else:
+                self.model_message = "Model unavailable: install PyTorch or use Train/--model"
+                print("Model controls set, but PyTorch/NN utilities not available. Use Train or --model to provide a model.")
         print("Model now controls:", self.model_control)
 
     def _start_training_thread(self) -> None:
@@ -392,93 +412,70 @@ class PygameUI:
         self._training_thread = t
 
     def _draw_sidebar(self, screen: pygame.Surface, rect: pygame.Rect, font: pygame.font.Font, large_font: pygame.font.Font) -> None:
-        x0 = rect.x + 8
-        y = 8
-        # title
-        title = large_font.render("Game Info", True, (255, 255, 255))
-        screen.blit(title, (x0, y))
-        y += 32
-        # current player
-        cp_text = font.render(f"Current: {self.current_player}", True, (255, 255, 255))
-        screen.blit(cp_text, (x0, y))
-        y += 24
-        # counts
-        wcount = count_pieces(self.board, 'white')
-        bcount = count_pieces(self.board, 'black')
-        wc = font.render(f"White pieces: {wcount}", True, (255, 255, 255))
-        bc = font.render(f"Black pieces: {bcount}", True, (255, 255, 255))
-        screen.blit(wc, (x0, y)); y += 20
-        screen.blit(bc, (x0, y)); y += 28
+         x0 = rect.x + 8
+         y = 8
+         # title
+         title = large_font.render("Game Info", True, (255, 255, 255))
+         screen.blit(title, (x0, y))
+         y += 32
+         # current player
+         cp_text = font.render(f"Current: {self.current_player}", True, (255, 255, 255))
+         screen.blit(cp_text, (x0, y))
+         y += 24
+         # counts
+         wcount = count_pieces(self.board, 'white')
+         bcount = count_pieces(self.board, 'black')
+         wc = font.render(f"White pieces: {wcount}", True, (255, 255, 255))
+         bc = font.render(f"Black pieces: {bcount}", True, (255, 255, 255))
+         screen.blit(wc, (x0, y)); y += 20
+         screen.blit(bc, (x0, y)); y += 28
 
-        # winner check
-        winner = determine_winner(self.board)
-        if winner is not None:
-            win_text = large_font.render(f"Result: {winner}", True, (255, 215, 0))
-            screen.blit(win_text, (x0, y)); y += 32
+         # winner check
+         winner = determine_winner(self.board)
+         if winner is not None:
+             win_text = large_font.render(f"Result: {winner}", True, (255, 215, 0))
+             screen.blit(win_text, (x0, y)); y += 32
 
-        # model info
-        model_label = "None"
-        if self.model is not None:
-            try:
-                params = sum(p.numel() for p in self.model.parameters())
-                model_label = f"params={params}"
-            except Exception:
-                model_label = "model"
-        ml = font.render(f"Model: {model_label}", True, (200, 200, 255))
-        screen.blit(ml, (x0, y)); y += 20
+         # model info
+         model_label = "None"
+         if self.model is not None:
+             try:
+                 params = sum(p.numel() for p in self.model.parameters())
+                 model_label = f"params={params}"
+             except Exception:
+                 model_label = "model"
+         ml = font.render(f"Model: {model_label}", True, (200, 200, 255))
+         screen.blit(ml, (x0, y)); y += 20
 
-        # buttons
-        btn_w = self.sidebar_width - 16
-        btn_h = 28
-        # Reset
-        reset_rect = pygame.Rect(x0, y, btn_w, btn_h)
-        pygame.draw.rect(screen, (100, 80, 80), reset_rect)
-        reset_text = font.render("Reset", True, (255, 255, 255))
-        screen.blit(reset_text, (x0 + 8, y + 6))
-        y += btn_h + 8
-        # Toggle Model AI
-        toggle_rect = pygame.Rect(x0, y, btn_w, btn_h)
-        pygame.draw.rect(screen, (80, 100, 80), toggle_rect)
-        mc_label = ",".join(sorted(self.model_control)) if self.model_control else "None"
-        toggle_text = font.render(f"Model controls: {mc_label}", True, (255, 255, 255))
-        screen.blit(toggle_text, (x0 + 8, y + 6))
-        y += btn_h + 8
-        # Train Model
-        train_rect = pygame.Rect(x0, y, btn_w, btn_h)
-        train_color = (80, 80, 120) if not self.training else (120, 120, 80)
-        pygame.draw.rect(screen, train_color, train_rect)
-        train_text = font.render("Train Model", True, (255, 255, 255))
-        screen.blit(train_text, (x0 + 8, y + 6))
-        y += btn_h + 12
+         # buttons
+         btn_w = self.sidebar_width - 16
+         btn_h = 28
+         # Reset
+         reset_rect = pygame.Rect(x0, y, btn_w, btn_h)
+         pygame.draw.rect(screen, (100, 80, 80), reset_rect)
+         reset_text = font.render("Reset", True, (255, 255, 255))
+         screen.blit(reset_text, (x0 + 8, y + 6))
+         y += btn_h + 8
+         # Toggle Model AI
+         toggle_rect = pygame.Rect(x0, y, btn_w, btn_h)
+         pygame.draw.rect(screen, (80, 100, 80), toggle_rect)
+         mc_label = ",".join(sorted(self.model_control)) if self.model_control else "None"
+         toggle_text = font.render(f"Model controls: {mc_label}", True, (255, 255, 255))
+         screen.blit(toggle_text, (x0 + 8, y + 6))
+         y += btn_h + 8
+         # Train Model
+         train_rect = pygame.Rect(x0, y, btn_w, btn_h)
+         train_color = (80, 80, 120) if not self.training else (120, 120, 80)
+         pygame.draw.rect(screen, train_color, train_rect)
+         train_text = font.render("Train Model", True, (255, 255, 255))
+         screen.blit(train_text, (x0 + 8, y + 6))
+         y += btn_h + 12
 
-        # training status
-        tstatus = font.render(self.training_status, True, (200, 200, 200))
-        screen.blit(tstatus, (x0, y))
-        y += 24
-
-        # If a piece is selected, show legal moves and model scores (if available)
-        if self.selected is not None:
-            sel_text = font.render(f"Selected: {self.selected}", True, (255, 255, 255))
-            screen.blit(sel_text, (x0, y)); y += 20
-            # list legal moves
-            for m in self.legal_moves:
-                mv_text = font.render(f"{m.frm}->{m.to} cap:{len(m.captures) if m.captures else 0}", True, (220, 220, 220))
-                screen.blit(mv_text, (x0, y)); y += 18
-            y += 6
-            if self.model is not None and score_moves is not None and len(self.legal_moves) > 0:
-                # compute scores for legal moves using the model
-                try:
-                    scored = score_moves(self.board, self.legal_moves, self.model)
-                    # sort by score desc
-                    scored.sort(key=lambda t: t[1], reverse=True)
-                    for m, s in scored:
-                        s_text = font.render(f"{m.frm}->{m.to}: {s:.3f}", True, (200, 255, 200))
-                        screen.blit(s_text, (x0, y)); y += 18
-                except Exception as e:
-                    err = font.render(f"Model eval error", True, (255, 100, 100))
-                    screen.blit(err, (x0, y)); y += 18
-
-        # draw small legend
-        y = rect.y + rect.h - 80
-        l1 = font.render("Esc/q: Quit    Space: Advance    Click buttons in sidebar", True, (180, 180, 180))
-        screen.blit(l1, (x0, y))
+         # cache button rects in sidebar-local coordinates for click handling
+         try:
+             rel_reset = pygame.Rect(reset_rect.x - rect.x, reset_rect.y - rect.y, reset_rect.w, reset_rect.h)
+             rel_toggle = pygame.Rect(toggle_rect.x - rect.x, toggle_rect.y - rect.y, toggle_rect.w, toggle_rect.h)
+             rel_train = pygame.Rect(train_rect.x - rect.x, train_rect.y - rect.y, train_rect.w, train_rect.h)
+             self._sidebar_buttons = {'reset': rel_reset, 'toggle': rel_toggle, 'train': rel_train}
+         except Exception:
+             self._sidebar_buttons = None
