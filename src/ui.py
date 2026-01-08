@@ -26,6 +26,7 @@ class PygameUI:
       - Reset: reset the board
       - Toggle Model AI: cycle which colors the model controls (None/White/Black/Both)
       - Train Model: start a background training run (uses train_random_positions)
+      - NN: White / NN: Black: toggle model control per color
     """
 
     def __init__(self, board: Board, square_size: int = 80, margin: int = 20, on_advance: Optional[Callable] = None, ai_players: Optional[Set[str]] = None, model: Optional[object] = None, sidebar_width: int = 240, anim_seconds: float = 0.35):
@@ -38,10 +39,34 @@ class PygameUI:
         self.sidebar_width = sidebar_width
         self.anim_seconds = anim_seconds
 
+        # Theme/colors
+        self.theme = {
+            'bg': (36, 36, 38),
+            'board_border': (50, 50, 52),
+            'light': (235, 219, 188),
+            'dark': (181, 136, 99),
+            'light2': (245, 228, 199),
+            'dark2': (171, 126, 89),
+            'highlight': (30, 144, 255),
+            'move_dot': (34, 139, 34),
+            'last_move_from': (255, 215, 0, 70),
+            'last_move_to': (60, 179, 113, 80),
+            'sidebar': (58, 58, 60),
+            'text': (240, 240, 240),
+            'muted': (200, 200, 200),
+            'danger': (180, 60, 60),
+            'ok': (60, 160, 80),
+            'info': (70, 90, 160),
+        }
+
         # Interaction state
         self.selected: Optional[Pos] = None
         self.legal_moves: List[Move] = []
         self.current_player = 'black'
+        self.last_move: Optional[Move] = None
+
+        # Mouse/hover
+        self._mouse_pos: Tuple[int, int] = (0, 0)
 
         # Animation state
         self.animating = False
@@ -124,6 +149,8 @@ class PygameUI:
             self.board = apply_move(self.board, self.anim_move)
         except Exception as e:
             print("Error applying move after animation:", e)
+        # store last move for highlight
+        self.last_move = self.anim_move
         # swap player
         self.current_player = 'white' if self.current_player == 'black' else 'black'
         # clear animation
@@ -175,6 +202,8 @@ class PygameUI:
                                 print("on_advance callback error:", e)
                         else:
                             print("Advance pressed (no callback set)")
+                elif event.type == pygame.MOUSEMOTION:
+                    self._mouse_pos = event.pos
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and not self.animating:
                     mx, my = event.pos
                     board_left = 0
@@ -256,7 +285,7 @@ class PygameUI:
                     self._finish_move_animation()
 
             # draw
-            screen.fill((40, 40, 40))
+            screen.fill(self.theme['bg'])
             # board area
             board_surface = screen.subsurface((0, 0, board_px, total_height))
             self._draw_board(board_surface)
@@ -273,9 +302,14 @@ class PygameUI:
             else:
                 self._draw_pieces(board_surface, self.board)
 
+            # overlays: last move and highlights
+            self._draw_last_move(board_surface)
+            self._draw_highlights(board_surface)
+            self._draw_hover(board_surface)
+
             # sidebar
             sidebar_rect = pygame.Rect(board_px, 0, self.sidebar_width, total_height)
-            pygame.draw.rect(screen, (60, 60, 60), sidebar_rect)
+            pygame.draw.rect(screen, self.theme['sidebar'], sidebar_rect)
             self._draw_sidebar(screen, sidebar_rect, font, large_font)
 
             pygame.display.flip()
@@ -283,14 +317,39 @@ class PygameUI:
         pygame.quit()
 
     def _draw_board(self, surface: pygame.Surface) -> None:
-        light = (240, 217, 181)
-        dark = (181, 136, 99)
+        # draw outer border
+        pygame.draw.rect(surface, self.theme['board_border'], (self.margin - 6, self.margin - 6, self.square_size * Board.SIZE + 12, self.square_size * Board.SIZE + 12), border_radius=6)
+        # wood-like alternating tones with subtle gradient per square
         for r in range(Board.SIZE):
             for c in range(Board.SIZE):
                 x = self.margin + c * self.square_size
                 y = self.margin + r * self.square_size
-                color = light if (r + c) % 2 == 0 else dark
-                pygame.draw.rect(surface, color, (x, y, self.square_size, self.square_size))
+                base = self.theme['light'] if (r + c) % 2 == 0 else self.theme['dark']
+                alt = self.theme['light2'] if (r + c) % 2 == 0 else self.theme['dark2']
+                # gradient vertical
+                rect = pygame.Rect(x, y, self.square_size, self.square_size)
+                self._fill_vertical_gradient(surface, rect, alt, base)
+        # grid outline
+        for i in range(Board.SIZE + 1):
+            x = self.margin + i * self.square_size
+            y = self.margin + i * self.square_size
+            pygame.draw.line(surface, (0, 0, 0, 40), (self.margin, y), (self.margin + self.square_size * Board.SIZE, y))
+            pygame.draw.line(surface, (0, 0, 0, 40), (x, self.margin), (x, self.margin + self.square_size * Board.SIZE))
+
+    def _fill_vertical_gradient(self, surface: pygame.Surface, rect: pygame.Rect, top_color: Tuple[int, int, int], bottom_color: Tuple[int, int, int]):
+        # simple vertical gradient fill
+        h = rect.height
+        if h <= 1:
+            pygame.draw.rect(surface, top_color, rect)
+            return
+        r1, g1, b1 = top_color
+        r2, g2, b2 = bottom_color
+        for i in range(h):
+            t = i / (h - 1)
+            r = int(r1 + (r2 - r1) * t)
+            g = int(g1 + (g2 - g1) * t)
+            b = int(b1 + (b2 - b1) * t)
+            pygame.draw.line(surface, (r, g, b), (rect.x, rect.y + i), (rect.x + rect.width, rect.y + i))
 
     def _draw_pieces(self, surface: pygame.Surface, board: Board, hide_from: Optional[Pos] = None) -> None:
         for r in range(Board.SIZE):
@@ -308,31 +367,86 @@ class PygameUI:
 
     def _draw_piece_at(self, surface: pygame.Surface, center: tuple, color: str, king: bool = False) -> None:
         cx, cy = center
-        radius = int(self.square_size * 0.4)
+        radius = int(self.square_size * 0.42)
+        # shadow
+        shadow_offset = (int(self.square_size * 0.06), int(self.square_size * 0.06))
+        shadow_color = (0, 0, 0, 80)
+        self._draw_circle(surface, (cx + shadow_offset[0], cy + shadow_offset[1]), radius, shadow_color)
+        # base colors
         if color == 'black':
-            border_color = (20, 20, 20)
-            fill_color = (40, 40, 40)
+            border_color = (25, 25, 25)
+            fill_color = (55, 55, 58)
+            rim_color = (95, 95, 100)
+            highlight = (255, 255, 255, 50)
         else:
-            border_color = (230, 230, 230)
-            fill_color = (255, 255, 255)
+            border_color = (210, 210, 210)
+            fill_color = (250, 250, 250)
+            rim_color = (220, 220, 220)
+            highlight = (255, 255, 255, 90)
+        # piece body (border + fill)
         pygame.draw.circle(surface, border_color, (cx, cy), radius)
-        pygame.draw.circle(surface, fill_color, (cx, cy), max(1, radius - 6))
+        pygame.draw.circle(surface, fill_color, (cx, cy), max(1, radius - 5))
+        # inner rim
+        pygame.draw.circle(surface, rim_color, (cx, cy), max(1, radius - 10), width=2)
+        # specular highlight
+        self._draw_circle(surface, (cx - radius // 3, cy - radius // 3), radius // 2, highlight)
+        # king marker
         if king:
             crown_color = (212, 175, 55)
             pygame.draw.circle(surface, crown_color, (cx, cy), radius // 3)
+            pygame.draw.circle(surface, (180, 140, 30), (cx, cy), radius // 3, width=2)
+
+    def _draw_circle(self, surface: pygame.Surface, center: Tuple[int, int], radius: int, color: Tuple[int, int, int, int]):
+        # draw a circle with optional alpha by using a temporary surface
+        diameter = radius * 2
+        temp = pygame.Surface((diameter, diameter), pygame.SRCALPHA)
+        pygame.draw.circle(temp, color, (radius, radius), radius)
+        surface.blit(temp, (center[0] - radius, center[1] - radius))
 
     def _draw_highlights(self, surface: pygame.Surface) -> None:
-        if self.selected is None:
+        # selection square
+        if self.selected is not None:
+            r, c = self.selected
+            x = self.margin + c * self.square_size
+            y = self.margin + r * self.square_size
+            pygame.draw.rect(surface, self.theme['highlight'], (x + 2, y + 2, self.square_size - 4, self.square_size - 4), width=3, border_radius=6)
+            # legal move dots
+            for m in self.legal_moves:
+                tr, tc = m.to
+                cx = self.margin + tc * self.square_size + self.square_size // 2
+                cy = self.margin + tr * self.square_size + self.square_size // 2
+                dot_radius = max(6, self.square_size // 10)
+                pygame.draw.circle(surface, self.theme['move_dot'], (cx, cy), dot_radius)
+
+    def _draw_last_move(self, surface: pygame.Surface) -> None:
+        if not self.last_move:
             return
-        r, c = self.selected
+        # semi-transparent overlays
+        def square_rect(pos: Pos) -> pygame.Rect:
+            r, c = pos
+            x = self.margin + c * self.square_size
+            y = self.margin + r * self.square_size
+            return pygame.Rect(x, y, self.square_size, self.square_size)
+        frm_rect = square_rect(self.last_move.frm)
+        to_rect = square_rect(self.last_move.to)
+        # from in gold tint, to in green tint
+        self._fill_rect_alpha(surface, frm_rect, self.theme['last_move_from'])
+        self._fill_rect_alpha(surface, to_rect, self.theme['last_move_to'])
+
+    def _fill_rect_alpha(self, surface: pygame.Surface, rect: pygame.Rect, color: Tuple[int, int, int, int]):
+        temp = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+        temp.fill(color)
+        surface.blit(temp, rect.topleft)
+
+    def _draw_hover(self, surface: pygame.Surface) -> None:
+        # highlight hovered dark square subtly
+        pos = self._mouse_to_board(self._mouse_pos)
+        if pos is None:
+            return
+        r, c = pos
         x = self.margin + c * self.square_size
         y = self.margin + r * self.square_size
-        pygame.draw.rect(surface, (30, 144, 255), (x, y, self.square_size, self.square_size), width=4)
-        for m in self.legal_moves:
-            tr, tc = m.to
-            cx = self.margin + tc * self.square_size + self.square_size // 2
-            cy = self.margin + tr * self.square_size + self.square_size // 2
-            pygame.draw.circle(surface, (34, 139, 34), (cx, cy), max(6, self.square_size // 8))
+        self._fill_rect_alpha(surface, pygame.Rect(x, y, self.square_size, self.square_size), (255, 255, 255, 25))
 
     def _handle_sidebar_click(self, rel_x: int, rel_y: int, font: pygame.font.Font) -> None:
         """Handle clicks in the sidebar area. Coordinates are relative to the sidebar origin."""
@@ -349,6 +463,12 @@ class PygameUI:
             if btns.get('train') and btns['train'].collidepoint(click_point):
                 self._start_training_thread()
                 return
+            if btns.get('nn_white') and btns['nn_white'].collidepoint(click_point):
+                self._toggle_model_color('white')
+                return
+            if btns.get('nn_black') and btns['nn_black'].collidepoint(click_point):
+                self._toggle_model_color('black')
+                return
         # fallback: ignore click if no cached buttons
         return
 
@@ -361,8 +481,43 @@ class PygameUI:
         self.anim_move = None
         self.anim_elapsed = 0.0
         self.current_player = 'black'
+        self.last_move = None
         self.training_status = ""
         print("Board reset")
+
+    def _ensure_nn_utils(self):
+        # try import of nn utils if not already present
+        if globals().get('CheckersNet') is None or globals().get('score_moves') is None:
+            try:
+                from src import nn as _nnmod
+                globals()['score_moves'] = getattr(_nnmod, 'score_moves', None)
+                globals()['train_random_positions'] = getattr(_nnmod, 'train_random_positions', None)
+                globals()['CheckersNet'] = getattr(_nnmod, 'CheckersNet', None)
+                globals()['load_model'] = getattr(_nnmod, 'load_model', None)
+            except Exception:
+                pass
+
+    def _toggle_model_color(self, color: str) -> None:
+        # Toggle a single color in model_control and ensure model is ready when enabling
+        if color not in {'white', 'black'}:
+            return
+        if color in self.model_control:
+            self.model_control.remove(color)
+        else:
+            self.model_control.add(color)
+            # ensure utilities and model exist
+            self._ensure_nn_utils()
+            if globals().get('CheckersNet') is not None:
+                with self._model_lock:
+                    if self.model is None:
+                        try:
+                            self.model = globals()['CheckersNet']()
+                            self.model_message = "Model instantiated"
+                        except Exception as e:
+                            self.model_message = f"Failed to instantiate model: {e}"
+            else:
+                self.model_message = "Model unavailable: install PyTorch"
+        print("Model now controls:", self.model_control)
 
     def _cycle_model_control(self) -> None:
         # cycle through: none -> white -> black -> both -> none
@@ -377,17 +532,7 @@ class PygameUI:
         # ensure a model exists if the user assigned model control
         if self.model_control and self.model is None:
             # try to (re)import NN utilities dynamically in case they were not available at module load
-            try:
-                from src import nn as _nnmod
-                # expose function references at module scope
-                globals()['score_moves'] = getattr(_nnmod, 'score_moves', None)
-                globals()['train_random_positions'] = getattr(_nnmod, 'train_random_positions', None)
-                globals()['CheckersNet'] = getattr(_nnmod, 'CheckersNet', None)
-                globals()['load_model'] = getattr(_nnmod, 'load_model', None)
-            except Exception:
-                # leave existing values as-is
-                pass
-
+            self._ensure_nn_utils()
             if 'CheckersNet' in globals() and globals()['CheckersNet'] is not None:
                 with self._model_lock:
                     if self.model is None:
@@ -434,21 +579,21 @@ class PygameUI:
         self._training_thread = t
 
     def _draw_sidebar(self, screen: pygame.Surface, rect: pygame.Rect, font: pygame.font.Font, large_font: pygame.font.Font) -> None:
-         x0 = rect.x + 8
-         y = 8
+         x0 = rect.x + 12
+         y = 10
          # title
-         title = large_font.render("Game Info", True, (255, 255, 255))
+         title = large_font.render("Game Info", True, self.theme['text'])
          screen.blit(title, (x0, y))
          y += 32
          # current player
-         cp_text = font.render(f"Current: {self.current_player}", True, (255, 255, 255))
+         cp_text = font.render(f"Current: {self.current_player}", True, self.theme['text'])
          screen.blit(cp_text, (x0, y))
          y += 24
          # counts
          wcount = count_pieces(self.board, 'white')
          bcount = count_pieces(self.board, 'black')
-         wc = font.render(f"White pieces: {wcount}", True, (255, 255, 255))
-         bc = font.render(f"Black pieces: {bcount}", True, (255, 255, 255))
+         wc = font.render(f"White pieces: {wcount}", True, self.theme['text'])
+         bc = font.render(f"Black pieces: {bcount}", True, self.theme['text'])
          screen.blit(wc, (x0, y)); y += 20
          screen.blit(bc, (x0, y)); y += 28
 
@@ -474,9 +619,10 @@ class PygameUI:
              screen.blit(mm, (x0, y)); y += 18
 
          # training status
-         tstatus = font.render(self.training_status, True, (200, 200, 200))
-         screen.blit(tstatus, (x0, y))
-         y += 24
+         if self.training_status:
+             tstatus = font.render(self.training_status, True, self.theme['muted'])
+             screen.blit(tstatus, (x0, y))
+             y += 24
 
          # model activity visualization
          if self.model_thinking:
@@ -494,45 +640,62 @@ class PygameUI:
                  score_text = font.render(label, True, (200, 255, 200))
                  screen.blit(score_text, (x0, y))
                  # bar
-                 bar_x = x0 + 80
+                 bar_x = x0 + 88
                  bar_y = y + 4
-                 bar_w = self.sidebar_width - 16 - 90
+                 bar_w = self.sidebar_width - 16 - 96
                  normalized = (s - min_s) / span if span > 0 else 0.5
                  fill_w = int(bar_w * normalized)
-                 pygame.draw.rect(screen, (30, 200, 30), (bar_x, bar_y, fill_w, 12))
-                 pygame.draw.rect(screen, (80, 80, 80), (bar_x, bar_y, bar_w, 12), 1)
+                 pygame.draw.rect(screen, (30, 200, 30), (bar_x, bar_y, fill_w, 12), border_radius=3)
+                 pygame.draw.rect(screen, (80, 80, 80), (bar_x, bar_y, bar_w, 12), 1, border_radius=3)
                  y += 18
              y += 6
 
          # buttons
-         btn_w = self.sidebar_width - 16
-         btn_h = 28
+         btn_w = self.sidebar_width - 24
+         btn_h = 30
          # Reset
          reset_rect = pygame.Rect(x0, y, btn_w, btn_h)
-         pygame.draw.rect(screen, (100, 80, 80), reset_rect)
+         pygame.draw.rect(screen, (100, 80, 80), reset_rect, border_radius=6)
          reset_text = font.render("Reset", True, (255, 255, 255))
-         screen.blit(reset_text, (x0 + 8, y + 6))
+         screen.blit(reset_text, (x0 + 10, y + 6))
          y += btn_h + 8
          # Toggle Model AI
          toggle_rect = pygame.Rect(x0, y, btn_w, btn_h)
-         pygame.draw.rect(screen, (80, 100, 80), toggle_rect)
+         pygame.draw.rect(screen, (80, 100, 80), toggle_rect, border_radius=6)
          mc_label = ",".join(sorted(self.model_control)) if self.model_control else "None"
          toggle_text = font.render(f"Model controls: {mc_label}", True, (255, 255, 255))
-         screen.blit(toggle_text, (x0 + 8, y + 6))
+         screen.blit(toggle_text, (x0 + 10, y + 6))
          y += btn_h + 8
          # Train Model
          train_rect = pygame.Rect(x0, y, btn_w, btn_h)
          train_color = (80, 80, 120) if not self.training else (120, 120, 80)
-         pygame.draw.rect(screen, train_color, train_rect)
+         pygame.draw.rect(screen, train_color, train_rect, border_radius=6)
          train_text = font.render("Train Model", True, (255, 255, 255))
-         screen.blit(train_text, (x0 + 8, y + 6))
-         y += btn_h + 12
+         screen.blit(train_text, (x0 + 10, y + 6))
+         y += btn_h + 8
+
+         # NN per-color toggles
+         nn_row_h = btn_h
+         col_w = (btn_w - 6) // 2
+         nn_white_rect = pygame.Rect(x0, y, col_w, nn_row_h)
+         nn_black_rect = pygame.Rect(x0 + col_w + 6, y, col_w, nn_row_h)
+         w_on = 'white' in self.model_control
+         b_on = 'black' in self.model_control
+         pygame.draw.rect(screen, (90, 120, 180) if w_on else (70, 70, 90), nn_white_rect, border_radius=6)
+         pygame.draw.rect(screen, (90, 120, 180) if b_on else (70, 70, 90), nn_black_rect, border_radius=6)
+         w_text = font.render("NN: White" + (" ✓" if w_on else ""), True, (255, 255, 255))
+         b_text = font.render("NN: Black" + (" ✓" if b_on else ""), True, (255, 255, 255))
+         screen.blit(w_text, (nn_white_rect.x + 8, nn_white_rect.y + 6))
+         screen.blit(b_text, (nn_black_rect.x + 8, nn_black_rect.y + 6))
+         y += nn_row_h + 12
 
          # cache button rects in sidebar-local coordinates for click handling
          try:
              rel_reset = pygame.Rect(reset_rect.x - rect.x, reset_rect.y - rect.y, reset_rect.w, reset_rect.h)
              rel_toggle = pygame.Rect(toggle_rect.x - rect.x, toggle_rect.y - rect.y, toggle_rect.w, toggle_rect.h)
              rel_train = pygame.Rect(train_rect.x - rect.x, train_rect.y - rect.y, train_rect.w, train_rect.h)
-             self._sidebar_buttons = {'reset': rel_reset, 'toggle': rel_toggle, 'train': rel_train}
+             rel_nn_white = pygame.Rect(nn_white_rect.x - rect.x, nn_white_rect.y - rect.y, nn_white_rect.w, nn_white_rect.h)
+             rel_nn_black = pygame.Rect(nn_black_rect.x - rect.x, nn_black_rect.y - rect.y, nn_black_rect.w, nn_black_rect.h)
+             self._sidebar_buttons = {'reset': rel_reset, 'toggle': rel_toggle, 'train': rel_train, 'nn_white': rel_nn_white, 'nn_black': rel_nn_black}
          except Exception:
              self._sidebar_buttons = None
