@@ -84,6 +84,7 @@ class PygameUI:
         # model activity visualization
         self.model_thinking: bool = False
         self.last_model_scores: Optional[List[tuple]] = None  # list of (move, score)
+        self.last_model_activations: Optional[List[float]] = None  # list of activations for the last move
         self.model_think_start: float = 0.0
 
         # training state
@@ -250,9 +251,12 @@ class PygameUI:
                          self.model_thinking = True
                          self.model_think_start = time.time()
                          moves = generate_legal_moves(self.board, self.current_player)
-                         scored = score_moves(self.board, moves, self.model)
+                         # Utiliser la nouvelle fonction pour récupérer activations
+                         from src.nn import score_moves_with_activations
+                         scored = score_moves_with_activations(self.board, moves, self.model)
                          # store for visualization
-                         self.last_model_scores = sorted(scored, key=lambda t: t[1], reverse=True)
+                         self.last_model_scores = [(m, s) for (m, s, acts) in scored]
+                         self.last_model_activations = scored[0][2] if scored else None
                          if self.last_model_scores:
                              # choose best score
                              move = self.last_model_scores[0][0]
@@ -649,6 +653,37 @@ class PygameUI:
                  pygame.draw.rect(screen, (80, 80, 80), (bar_x, bar_y, bar_w, 12), 1, border_radius=3)
                  y += 18
              y += 6
+
+         # Visualisation des activations du réseau de neurones
+         if self.last_model_activations:
+             y += 10
+             act_title = font.render("NN Activations:", True, (200, 220, 255))
+             screen.blit(act_title, (x0, y)); y += 18
+             # Pour chaque couche, afficher un mini-graphique
+             for layer, acts in self.last_model_activations.items():
+                 layer_text = font.render(layer, True, (180, 180, 255))
+                 screen.blit(layer_text, (x0, y))
+                 # On prend le premier batch (shape: (1, ...))
+                 arr = acts[0]
+                 # Pour les couches conv: shape (channels, 8, 8), pour fc: (256,) ou (1,)
+                 if arr.ndim == 3:
+                     # On affiche la moyenne d'activation par canal
+                     means = arr.mean(axis=(1,2))
+                 elif arr.ndim == 2:
+                     means = arr.mean(axis=1)
+                 else:
+                     means = arr.flatten()
+                 # Limite à 16 neurones/canaux pour le visuel
+                 for i, v in enumerate(means[:16]):
+                     bar_x = x0 + 80 + i * 8
+                     bar_y = y + 2
+                     bar_h = 12
+                     bar_w = 6
+                     # Couleur selon intensité
+                     color = (int(80 + 175 * min(1, abs(v))), int(80 + 175 * max(0, v)), 220)
+                     pygame.draw.rect(screen, color, (bar_x, bar_y, bar_w, bar_h), border_radius=2)
+                 y += 16
+             y += 8
 
          # buttons
          btn_w = self.sidebar_width - 24

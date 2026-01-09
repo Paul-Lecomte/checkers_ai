@@ -60,15 +60,25 @@ class CheckersNet(nn.Module):
         self.conv3 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
         self.fc1 = nn.Linear(64 * Board.SIZE * Board.SIZE, 256)
         self.fc2 = nn.Linear(256, 1)
+        # Ajout pour stocker les activations
+        self.activations = {}
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = x.view(x.size(0), -1)
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x.squeeze(-1)
+    def forward(self, x: torch.Tensor, return_activations: bool = False):
+        acts = {}
+        x1 = F.relu(self.conv1(x))
+        acts['conv1'] = x1.detach().cpu().numpy()
+        x2 = F.relu(self.conv2(x1))
+        acts['conv2'] = x2.detach().cpu().numpy()
+        x3 = F.relu(self.conv3(x2))
+        acts['conv3'] = x3.detach().cpu().numpy()
+        x_flat = x3.view(x3.size(0), -1)
+        x4 = F.relu(self.fc1(x_flat))
+        acts['fc1'] = x4.detach().cpu().numpy()
+        x5 = self.fc2(x4)
+        acts['fc2'] = x5.detach().cpu().numpy()
+        if return_activations:
+            return x5.squeeze(-1), acts
+        return x5.squeeze(-1)
 
 
 def score_moves(board: Board, moves: List[Move], model: nn.Module, device: Optional[torch.device] = None) -> List[tuple]:
@@ -86,6 +96,20 @@ def score_moves(board: Board, moves: List[Move], model: nn.Module, device: Optio
             # out can be tensor of shape (1,) or scalar
             score = float(out.cpu().numpy().item()) if isinstance(out, torch.Tensor) else float(out)
             results.append((m, score))
+    return results
+
+
+def score_moves_with_activations(board: Board, moves: List[Move], model: nn.Module, device: Optional[torch.device] = None):
+    """Retourne (move, score, activations) pour chaque coup."""
+    model.eval()
+    results = []
+    with torch.no_grad():
+        for m in moves:
+            nb = apply_move(board, m)
+            inp = board_to_tensor(nb, device=device)
+            out, acts = model(inp, return_activations=True)
+            score = float(out.cpu().numpy().item()) if isinstance(out, torch.Tensor) else float(out)
+            results.append((m, score, acts))
     return results
 
 
@@ -167,4 +191,3 @@ def train_random_positions(model: nn.Module, epochs: int = 10, lr: float = 1e-3,
 
     # done training
     model.to('cpu')
-
