@@ -18,15 +18,23 @@ except Exception:
     CheckersNet = None
     load_model = None
 
+# optional PPO agent
+try:
+    from src.nn import PPOAgent, PolicyValueNet
+except Exception:
+    PPOAgent = None
+    PolicyValueNet = None
+
 
 class PygameUI:
-    """Pygame UI with animated moves, sidebar and model controls.
+    """Pygame UI avec animations de coups, sidebar et contrôles modèle/IA.
 
-    Buttons added in sidebar:
-      - Reset: reset the board
-      - Toggle Model AI: cycle which colors the model controls (None/White/Black/Both)
-      - Train Model: start a background training run (uses train_random_positions)
-      - NN: White / NN: Black: toggle model control per color
+    Boutons dans la sidebar:
+      - Reset
+      - Toggle Model AI (None/White/Black/Both)
+      - Train Model (supervisé)
+      - NN: White / NN: Black
+      - Save PPO / Load PPO (si PPO disponible)
     """
 
     def __init__(self, board: Board, square_size: int = 80, margin: int = 20, on_advance: Optional[Callable] = None, ai_players: Optional[Set[str]] = None, model: Optional[object] = None, sidebar_width: int = 240, anim_seconds: float = 0.35):
@@ -77,21 +85,26 @@ class PygameUI:
         self.anim_piece_color = None
         self.board_before_anim: Optional[Board] = None
 
-        # model control state: which colors are controlled by the neural network
+        # model control state
         self.model_control: Set[str] = set()
-        # human-visible model status message shown in sidebar
         self.model_message: str = ""
-        # model activity visualization
         self.model_thinking: bool = False
-        self.last_model_scores: Optional[List[tuple]] = None  # list of (move, score)
-        self.last_model_activations: Optional[List[float]] = None  # list of activations for the last move
+        self.last_model_scores: Optional[List[tuple]] = None
+        self.last_model_activations: Optional[List[float]] = None
         self.model_think_start: float = 0.0
 
-        # training state
+        # training state (supervised demo)
         self.training = False
         self.training_status = ""
         self._training_thread: Optional[threading.Thread] = None
         self._model_lock = threading.Lock()
+
+        # PPO state
+        self.ppo_agent = None
+        self.ppo_actions_since_update = 0
+        self.ppo_update_interval = 12  # update after N actions collected
+        self.ppo_last_loss: Optional[float] = None
+        self.ppo_save_path = "ppo_model.pt"
 
     def set_on_advance(self, callback: Callable[[Board], Board]):
         self.on_advance = callback
@@ -239,29 +252,33 @@ class PygameUI:
                                 self.legal_moves = []
 
             # AI turn: if it's AI's turn and not animating, play
-            # Consider both simple ai_players and model_control (model-controlled colors)
             if not self.animating and (self.current_player in self.ai_players or self.current_player in self.model_control):
-                 # small pause to make it visible
                  time.sleep(0.2)
                  move = None
-                 # prefer model-controlled move if configured
-                 if self.current_player in self.model_control and self.model is not None and score_moves is not None:
+                 # Prefer PPO agent selection if active for this color
+                 if self.current_player in self.model_control and self.ppo_agent is not None:
                      try:
-                         # indicate thinking
+                         moves = generate_legal_moves(self.board, self.current_player)
+                         if moves:
+                             move, info = self.ppo_agent.select_action(self.board, moves)
+                             # simple visualization from info if needed
+                             self.last_model_scores = [(m, float(info['logits'][i])) for i, m in enumerate(moves)] if 'logits' in info else None
+                     except Exception as e:
+                         print("PPO select error, fallback:", e)
+                         move = None
+                 # else fallback to value scoring model
+                 if move is None and self.current_player in self.model_control and self.model is not None and score_moves is not None:
+                     try:
                          self.model_thinking = True
                          self.model_think_start = time.time()
                          moves = generate_legal_moves(self.board, self.current_player)
-                         # Utiliser la nouvelle fonction pour récupérer activations
                          from src.nn import score_moves_with_activations
                          scored = score_moves_with_activations(self.board, moves, self.model)
-                         # store for visualization
                          self.last_model_scores = [(m, s) for (m, s, acts) in scored]
                          self.last_model_activations = scored[0][2] if scored else None
                          if self.last_model_scores:
-                             # choose best score
-                             move = self.last_model_scores[0][0]
-                         # short visible pause so user sees the thinking/visual
-                         time.sleep(0.35)
+                             move = max(self.last_model_scores, key=lambda t: t[1])[0]
+                         time.sleep(0.25)
                      except Exception as e:
                          print("Model move error, falling back to random:", e)
                          move = None
@@ -270,13 +287,9 @@ class PygameUI:
                  if move is None:
                      move = choose_random_move(self.board, self.current_player)
                  if move:
-                     # highlight chosen move in last_model_scores if present
                      try:
-                         if self.last_model_scores is not None:
-                             # move may not be in list if random fallback; ensure it's first
-                             if not any(m is move or (m.frm == move.frm and m.to == move.to) for m, _ in self.last_model_scores):
-                                 # prepend move with a neutral score
-                                 self.last_model_scores = [(move, 0.0)] + (self.last_model_scores or [])
+                         if self.last_model_scores is not None and not any(m.frm == move.frm and m.to == move.to for m, _ in self.last_model_scores):
+                             self.last_model_scores = [(move, 0.0)] + (self.last_model_scores or [])
                      except Exception:
                          pass
                      self._perform_move_or_animate(move)
@@ -285,7 +298,8 @@ class PygameUI:
             if self.animating and self.anim_move is not None:
                 self.anim_elapsed += dt
                 if self.anim_elapsed >= self.anim_seconds:
-                    # finish
+                    # before finishing, compute PPO reward if relevant
+                    self._apply_ppo_reward_after_move()
                     self._finish_move_animation()
 
             # draw
@@ -455,25 +469,22 @@ class PygameUI:
     def _handle_sidebar_click(self, rel_x: int, rel_y: int, font: pygame.font.Font) -> None:
         """Handle clicks in the sidebar area. Coordinates are relative to the sidebar origin."""
         click_point = (rel_x, rel_y)
-        # Use cached button rects (relative to sidebar) if available
         btns = getattr(self, '_sidebar_buttons', None)
         if btns:
             if btns.get('reset') and btns['reset'].collidepoint(click_point):
-                self._do_reset()
-                return
+                self._do_reset(); return
             if btns.get('toggle') and btns['toggle'].collidepoint(click_point):
-                self._cycle_model_control()
-                return
+                self._cycle_model_control(); return
             if btns.get('train') and btns['train'].collidepoint(click_point):
-                self._start_training_thread()
-                return
+                self._start_training_thread(); return
             if btns.get('nn_white') and btns['nn_white'].collidepoint(click_point):
-                self._toggle_model_color('white')
-                return
+                self._toggle_model_color('white'); return
             if btns.get('nn_black') and btns['nn_black'].collidepoint(click_point):
-                self._toggle_model_color('black')
-                return
-        # fallback: ignore click if no cached buttons
+                self._toggle_model_color('black'); return
+            if btns.get('ppo_save') and btns['ppo_save'].collidepoint(click_point):
+                self._save_ppo(); return
+            if btns.get('ppo_load') and btns['ppo_load'].collidepoint(click_point):
+                self._load_ppo(); return
         return
 
     def _do_reset(self) -> None:
@@ -500,9 +511,17 @@ class PygameUI:
                 globals()['load_model'] = getattr(_nnmod, 'load_model', None)
             except Exception:
                 pass
+        # ensure PPO availability
+        if globals().get('PPOAgent') is None or globals().get('PolicyValueNet') is None:
+            try:
+                from src import nn as _nnmod
+                globals()['PPOAgent'] = getattr(_nnmod, 'PPOAgent', None)
+                globals()['PolicyValueNet'] = getattr(_nnmod, 'PolicyValueNet', None)
+            except Exception:
+                pass
 
     def _toggle_model_color(self, color: str) -> None:
-        # Toggle a single color in model_control and ensure model is ready when enabling
+        # Toggle a single color in model_control and ensure model/ppo ready when enabling
         if color not in {'white', 'black'}:
             return
         if color in self.model_control:
@@ -511,16 +530,22 @@ class PygameUI:
             self.model_control.add(color)
             # ensure utilities and model exist
             self._ensure_nn_utils()
-            if globals().get('CheckersNet') is not None:
-                with self._model_lock:
-                    if self.model is None:
-                        try:
-                            self.model = globals()['CheckersNet']()
-                            self.model_message = "Model instantiated"
-                        except Exception as e:
-                            self.model_message = f"Failed to instantiate model: {e}"
-            else:
-                self.model_message = "Model unavailable: install PyTorch"
+            with self._model_lock:
+                # instantiate PPO agent if available
+                if globals().get('PPOAgent') is not None and self.ppo_agent is None:
+                    try:
+                        self.ppo_agent = globals()['PPOAgent']()
+                        self.model_message = "PPO agent ready"
+                    except Exception as e:
+                        self.model_message = f"Failed to init PPO: {e}"
+                # fall back to value net for scoring
+                if self.model is None and globals().get('CheckersNet') is not None:
+                    try:
+                        self.model = globals()['CheckersNet']()
+                        if not self.model_message:
+                            self.model_message = "Value model ready"
+                    except Exception as e:
+                        self.model_message = f"Failed to instantiate model: {e}"
         print("Model now controls:", self.model_control)
 
     def _cycle_model_control(self) -> None:
@@ -533,54 +558,79 @@ class PygameUI:
             self.model_control = {'white', 'black'}
         else:
             self.model_control = set()
-        # ensure a model exists if the user assigned model control
-        if self.model_control and self.model is None:
-            # try to (re)import NN utilities dynamically in case they were not available at module load
-            self._ensure_nn_utils()
-            if 'CheckersNet' in globals() and globals()['CheckersNet'] is not None:
-                with self._model_lock:
-                    if self.model is None:
-                        try:
-                            self.model = globals()['CheckersNet']()
-                            self.model_message = "Model instantiated"
-                            print("Instantiated new CheckersNet for model control")
-                        except Exception as e:
-                            self.model_message = f"Failed to instantiate model: {e}"
-                            print("Failed to instantiate model:", e)
-            else:
-                self.model_message = "Model unavailable: install PyTorch or use Train/--model"
-                print("Model controls set, but PyTorch/NN utilities not available. Use Train or --model to provide a model.")
+        # ensure models/agent exist
+        self._ensure_nn_utils()
+        with self._model_lock:
+            if self.model_control and self.ppo_agent is None and globals().get('PPOAgent') is not None:
+                try:
+                    self.ppo_agent = globals()['PPOAgent']()
+                    self.model_message = "PPO agent ready"
+                except Exception as e:
+                    self.model_message = f"Failed to init PPO: {e}"
+            if self.model_control and self.model is None and globals().get('CheckersNet') is not None:
+                try:
+                    self.model = globals()['CheckersNet']()
+                except Exception as e:
+                    self.model_message = f"Failed to instantiate model: {e}"
         print("Model now controls:", self.model_control)
 
-    def _start_training_thread(self) -> None:
-        if train_random_positions is None or CheckersNet is None:
-            print("Training not available: PyTorch or training utilities missing.")
+    def _save_ppo(self) -> None:
+        if self.ppo_agent is None:
+            print("No PPO agent to save")
             return
-        if self.training:
-            print("Training already running")
-            return
-        # ensure a model exists
-        with self._model_lock:
-            if self.model is None:
-                self.model = CheckersNet()
-        # start thread
-        self.training = True
-        self.training_status = "Starting..."
+        try:
+            import torch
+            torch.save({
+                'model': self.ppo_agent.model.state_dict(),
+                'optim': self.ppo_agent.optimizer.state_dict(),
+            }, self.ppo_save_path)
+            self.model_message = f"Saved PPO to {self.ppo_save_path}"
+        except Exception as e:
+            self.model_message = f"Save PPO failed: {e}"
 
-        def _train():
-            def progress_cb(epoch, loss):
-                self.training_status = f"Epoch {epoch}: loss={loss:.4f}"
+    def _load_ppo(self) -> None:
+        self._ensure_nn_utils()
+        if self.ppo_agent is None and globals().get('PPOAgent') is not None:
             try:
-                train_random_positions(self.model, epochs=5, n_positions=64, progress_callback=progress_cb)
-                self.training_status = "Training done"
+                self.ppo_agent = globals()['PPOAgent']()
             except Exception as e:
-                self.training_status = f"Training error: {e}"
-            finally:
-                self.training = False
+                self.model_message = f"Init PPO failed: {e}"; return
+        if self.ppo_agent is None:
+            print("PPO not available")
+            return
+        try:
+            import torch
+            ckpt = torch.load(self.ppo_save_path, map_location='cpu')
+            self.ppo_agent.model.load_state_dict(ckpt['model'])
+            self.ppo_agent.optimizer.load_state_dict(ckpt['optim'])
+            self.model_message = f"Loaded PPO from {self.ppo_save_path}"
+        except Exception as e:
+            self.model_message = f"Load PPO failed: {e}"
 
-        t = threading.Thread(target=_train, daemon=True)
-        t.start()
-        self._training_thread = t
+    def _apply_ppo_reward_after_move(self) -> None:
+        """Compute a small shaping reward and record outcome to PPO buffer; possibly trigger update."""
+        if self.ppo_agent is None or self.anim_move is None:
+            return
+        # material balance shaping
+        w = count_pieces(self.board, 'white')
+        b = count_pieces(self.board, 'black')
+        material = (w - b) / 12.0
+        # terminal bonus
+        winner = determine_winner(self.board)
+        done = winner is not None
+        reward = material
+        if done:
+            reward += 1.0 if winner == 'white' else (-1.0 if winner == 'black' else 0.0)
+        try:
+            self.ppo_agent.record_outcome(reward, done)
+            self.ppo_actions_since_update += 1
+            if self.ppo_actions_since_update >= self.ppo_update_interval:
+                stats = self.ppo_agent.update(epochs=2, batch_size=32)
+                self.ppo_last_loss = stats.get('loss')
+                self.ppo_actions_since_update = 0
+                self.model_message = f"PPO updated: loss={self.ppo_last_loss:.3f}"
+        except Exception as e:
+            print("PPO reward/update error:", e)
 
     def _draw_sidebar(self, screen: pygame.Surface, rect: pygame.Rect, font: pygame.font.Font, large_font: pygame.font.Font) -> None:
          x0 = rect.x + 12
@@ -684,6 +734,32 @@ class PygameUI:
                      pygame.draw.rect(screen, color, (bar_x, bar_y, bar_w, bar_h), border_radius=2)
                  y += 16
              y += 8
+
+         # PPO status
+         if self.ppo_agent is not None:
+             y += 4
+             ppo_text = font.render(f"PPO ready. Last loss: {self.ppo_last_loss if self.ppo_last_loss is not None else '-'}", True, (180, 220, 200))
+             screen.blit(ppo_text, (x0, y)); y += 20
+         # buttons save/load PPO
+         btn_w = self.sidebar_width - 24
+         btn_h = 30
+         ppo_save_rect = pygame.Rect(x0, y, btn_w, btn_h)
+         pygame.draw.rect(screen, (90, 90, 130), ppo_save_rect, border_radius=6)
+         ppo_save_text = font.render("Save PPO", True, (255, 255, 255))
+         screen.blit(ppo_save_text, (x0 + 10, y + 6)); y += btn_h + 8
+         ppo_load_rect = pygame.Rect(x0, y, btn_w, btn_h)
+         pygame.draw.rect(screen, (90, 130, 90), ppo_load_rect, border_radius=6)
+         ppo_load_text = font.render("Load PPO", True, (255, 255, 255))
+         screen.blit(ppo_load_text, (x0 + 10, y + 6)); y += btn_h + 12
+         # cache button rects (extend existing)
+         try:
+             rel_save = pygame.Rect(ppo_save_rect.x - rect.x, ppo_save_rect.y - rect.y, ppo_save_rect.w, ppo_save_rect.h)
+             rel_load = pygame.Rect(ppo_load_rect.x - rect.x, ppo_load_rect.y - rect.y, ppo_load_rect.w, ppo_load_rect.h)
+             if not hasattr(self, '_sidebar_buttons') or self._sidebar_buttons is None:
+                 self._sidebar_buttons = {}
+             self._sidebar_buttons.update({'ppo_save': rel_save, 'ppo_load': rel_load})
+         except Exception:
+             pass
 
          # buttons
          btn_w = self.sidebar_width - 24
