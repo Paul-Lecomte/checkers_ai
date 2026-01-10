@@ -45,7 +45,8 @@ class PygameUI:
         self.ai_players = ai_players or set()
         self.model = model
         self.sidebar_width = sidebar_width
-        self.anim_seconds = anim_seconds
+        # make default animation slightly longer for visibility
+        self.anim_seconds = anim_seconds if anim_seconds is not None else 0.5
 
         # Theme/colors
         self.theme = {
@@ -143,7 +144,8 @@ class PygameUI:
         self.anim_move = move
         self.anim_elapsed = 0.0
         self.anim_piece_color = piece.color
-        self.board_before_anim = self.board
+        # use a clone snapshot for stable rendering during animation
+        self.board_before_anim = self.board.clone()
         # compute start/end centers in pixels
         sx = self.margin + move.frm[1] * self.square_size + self.square_size // 2
         sy = self.margin + move.frm[0] * self.square_size + self.square_size // 2
@@ -180,6 +182,15 @@ class PygameUI:
     def _perform_move_or_animate(self, move: Move) -> None:
         # start animation and let it finish to apply move
         self._start_move_animation(move)
+
+    def _ease(self, t: float) -> float:
+        """Smooth ease-in-out (cosine). t in [0,1] -> eased t."""
+        if t <= 0.0:
+            return 0.0
+        if t >= 1.0:
+            return 1.0
+        import math
+        return 0.5 - 0.5 * math.cos(math.pi * t)
 
     def run(self) -> None:
         try:
@@ -310,12 +321,25 @@ class PygameUI:
             # during animation, draw from board_before_anim with the moving piece drawn separately
             if self.animating and self.board_before_anim is not None:
                 self._draw_pieces(board_surface, self.board_before_anim, hide_from=self.anim_move.frm)
-                # draw moving piece at interpolated position
-                t = min(1.0, (self.anim_elapsed / max(1e-6, self.anim_seconds)))
+                # draw moving piece at eased interpolated position with subtle trail
+                t_raw = min(1.0, (self.anim_elapsed / max(1e-6, self.anim_seconds)))
+                t = self._ease(t_raw)
                 sx, sy = self.anim_start_px
                 ex, ey = self.anim_end_px
                 cx = int(sx + (ex - sx) * t)
                 cy = int(sy + (ey - sy) * t)
+                # trail: draw 3 ghost positions behind the current position
+                trail_steps = 3
+                for i in range(1, trail_steps + 1):
+                    tt = max(0.0, t - i * 0.06)
+                    gx = int(sx + (ex - sx) * tt)
+                    gy = int(sy + (ey - sy) * tt)
+                    # draw faint ghost circle
+                    ghost_alpha = max(20, 80 - i * 20)
+                    radius = int(self.square_size * 0.42)
+                    color = (255, 255, 255, ghost_alpha) if self.anim_piece_color == 'white' else (0, 0, 0, ghost_alpha)
+                    self._draw_circle(board_surface, (gx, gy), max(1, radius - 6), color)
+                # main moving piece
                 self._draw_piece_at(board_surface, (cx, cy), self.anim_piece_color)
             else:
                 self._draw_pieces(board_surface, self.board)
