@@ -107,6 +107,10 @@ class PygameUI:
         self.ppo_last_loss: Optional[float] = None
         self.ppo_save_path = "ppo_model.pt"
 
+        # Initialize pygame mixer for sound effects
+        pygame.mixer.init()
+        self.move_sound = pygame.mixer.Sound("move_sound.wav")  # Load a sound file for moves
+
     def set_on_advance(self, callback: Callable[[Board], Board]):
         self.on_advance = callback
 
@@ -131,10 +135,18 @@ class PygameUI:
     def _is_move_destination(self, pos: Pos) -> bool:
         return any(m.to == pos for m in self.legal_moves)
 
+    def _play_move_sound(self):
+        """Play a sound effect for a move."""
+        if self.move_sound:
+            self.move_sound.play()
+
     def _start_move_animation(self, move: Move) -> None:
         """Prepare animation: store move, piece color, compute pixel coordinates, and mark animating.
         The actual board update will be applied when animation completes.
         """
+        # Play sound for the move
+        self._play_move_sound()
+
         if self.animating:
             return
         piece = self.board.get_piece(move.frm)
@@ -834,3 +846,4 @@ class PygameUI:
              self._sidebar_buttons = {'reset': rel_reset, 'toggle': rel_toggle, 'train': rel_train, 'nn_white': rel_nn_white, 'nn_black': rel_nn_black}
          except Exception:
              self._sidebar_buttons = None
+
