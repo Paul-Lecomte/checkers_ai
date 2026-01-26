@@ -1,3 +1,4 @@
+# Pygame UI for Checkers with animations, sidebar, and model/AI controls.
 from typing import Callable, Optional, List, Set, Tuple
 import threading
 
