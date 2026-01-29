@@ -1,3 +1,4 @@
+# Checkers game rules implementation: move generation, application, and win condition checking.
 from typing import List, Tuple, Optional
 from src.engine.board import Board
 from src.engine.move import Move, Pos
