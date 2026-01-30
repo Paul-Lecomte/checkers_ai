@@ -1,3 +1,4 @@
+# AI module for choosing moves in a chess game.
 from typing import Optional
 import random
 
