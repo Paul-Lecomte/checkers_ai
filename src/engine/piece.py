@@ -1,3 +1,4 @@
+# Represents a checkers piece in the game engine.
 from dataclasses import dataclass
 
 
