@@ -1,5 +1,9 @@
 """Entry point for the checkers game
 Run: python -m src.main [--ai-white] [--ai-black] [--ai-both] [--model <path>] [--train <out_path>] [--train-epochs <n>] [--nn-controls <none|white|black|both>]
+Options:
+--ai-white       : make the white player AI-controlled
+--ai-black       : make the black player AI-controlled
+--ai-both        : make both players AI-controlled
 """
 
 import sys
