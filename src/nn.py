@@ -1,4 +1,5 @@
-"""Neural network utilities and PPO agent for Checkers using PyTorch.
+"""
+Neural network utilities and PPO agent for Checkers using PyTorch.
 
 This module now provides:
 - board_to_tensor(board): convert a Board to a torch tensor input
