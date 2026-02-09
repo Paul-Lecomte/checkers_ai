@@ -9,6 +9,7 @@ This module now provides:
 - score_moves helpers (still available) and legacy CheckersNet preserved for compatibility
 
 Note: PyTorch must be installed in the environment to import and use this module.
+Note : The PPOAgent is a more complex agent that can be trained via self-play or against other opponents, while the legacy CheckersNet and score_moves functions are simpler utilities for evaluating positions and moves. Depending on your use case, you may choose to use one or both of these approaches in your application.
 """
 from typing import List, Optional, Callable, Tuple, Dict
 from dataclasses import dataclass
