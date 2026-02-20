@@ -1,3 +1,4 @@
+# This module defines the Move class, which represents a move in the game of checkers.
 from dataclasses import dataclass
 from typing import List, Tuple
 
