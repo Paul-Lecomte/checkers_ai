@@ -1,3 +1,4 @@
+# Board representation and utilities for checkers game.
 from copy import deepcopy
 from typing import List, Optional, Tuple
 from src.engine.piece import Piece
