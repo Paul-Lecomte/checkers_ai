@@ -1,5 +1,6 @@
 # Board representation and utilities for checkers game.
 # This module defines the Board class, which represents the state of the checkers board.
+# The Board class provides methods to get and set pieces, clone the board, and count pieces.
 from copy import deepcopy
 from typing import List, Optional, Tuple
 from src.engine.piece import Piece
